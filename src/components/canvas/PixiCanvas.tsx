@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react"
+import { useEffect, useRef, useCallback,useState } from "react"
 import {
   Application,
   Container,
@@ -14,19 +14,12 @@ import {
 } from "pixi.js"
 import type { TextStyleFontWeight } from "pixi.js"
 import { useCanvas } from "../../store/CanvasProvider"
-import type { CanvasElement } from "../../types/canvas"
+import type { CanvasElement,TextElement } from "../../types/canvas"
 
 type ResizeDirection = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw"
 
 const RESIZE_DIRECTIONS: ResizeDirection[] = [
-  "n",
-  "ne",
-  "e",
-  "se",
-  "s",
-  "sw",
-  "w",
-  "nw",
+  "n","ne","e","se","s","sw","w","nw",
 ]
 
 const RESIZE_CURSORS: Record<ResizeDirection, string> = {
@@ -90,7 +83,8 @@ const createShape = (
   element: CanvasElement,
   selected: boolean,
   interactionMode: "select" | "pan",
-  onPointerDown: (event: FederatedPointerEvent) => void
+  onPointerDown: (event: FederatedPointerEvent) => void,
+  onDoubleClick:(id:string) => void //双击事件
 ) => {
   const container = new Container()
   container.position.set(element.x, element.y)
@@ -99,6 +93,18 @@ const createShape = (
   container.eventMode = "static"
   container.cursor = interactionMode === "select" ? "move" : "grab"
   container.hitArea = new Rectangle(0, 0, element.width, element.height)
+
+  //双击检测，通过两次点击的事件间隔模拟双击
+  let lastClickTime = 0;
+  container.on("pointertap",(e)=>{
+    const now = Date.now();
+    if(now - lastClickTime < 300 && element.type === "text" && interactionMode ==="select"){
+      e.stopPropagation();
+      onDoubleClick(element.id)
+    }
+    lastClickTime = now;
+  })
+
 
   if (selected) {
     const outline = new Graphics()
@@ -219,6 +225,83 @@ const createShape = (
   return container
 }
 
+//文本编辑器覆盖层组件
+const TextEditor = ({
+  element,
+  zoom,
+  pan,
+  onCommit,
+  onCancel,
+}: {
+  element: TextElement
+  zoom: number
+  pan: { x: number; y: number }
+  onCommit: (id: string, newText: string) => void
+  onCancel: () => void
+}) => {
+  const [value, setValue] = useState(element.text)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // 自动聚焦并全选
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.focus()
+      textareaRef.current.select()
+    }
+  }, [])
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    e.stopPropagation() // 阻止事件冒泡，防止触发 CanvasArea 的快捷键（如 Space, Delete）
+    
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      onCommit(element.id, value)
+    }
+    if (e.key === "Escape") {
+      e.preventDefault()
+      onCancel()
+    }
+  }
+
+  // 计算 CSS 样式以匹配 Canvas 中的位置和外观
+  const style: React.CSSProperties = {
+    position: "absolute",
+    left: `${pan.x + element.x * zoom}px`,
+    top: `${pan.y + element.y * zoom}px`,
+    width: `${element.width * zoom}px`,
+    height: `${element.height * zoom}px`,
+    transform: `rotate(${element.rotation}deg)`,
+    transformOrigin: "top left",
+    fontSize: `${element.fontSize * zoom}px`,
+    fontFamily: element.fontFamily,
+    fontWeight: element.fontWeight,
+    color: element.color,
+    backgroundColor: element.background === "transparent" ? "rgba(255,255,255,0.8)" : element.background, // 编辑时稍微加个底色保证可见
+    lineHeight: element.lineHeight,
+    textAlign: element.align,
+    padding: `${12 * zoom}px`, // 匹配 Pixi text 的 position offset
+    border: "2px solid #39b5ff", // 视觉反馈：边框
+    outline: "none",
+    resize: "none",
+    overflow: "hidden",
+    zIndex: 50,
+    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+  }
+
+  return (
+    <textarea
+      ref={textareaRef}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={handleKeyDown}
+      onBlur={() => onCommit(element.id, value)} // 失焦自动保存，也可以改成 onCancel
+      style={style}
+      className="rounded-lg"
+    />
+  )
+}
+
+
 export const PixiCanvas = () => {
   const {
     state,
@@ -227,7 +310,9 @@ export const PixiCanvas = () => {
     mutateElements,
     panBy,
     registerApp,
+    updateElement,
   } = useCanvas()
+
   const wrapperRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
   const contentRef = useRef<Container | null>(null)
@@ -255,6 +340,7 @@ export const PixiCanvas = () => {
   const isSelectedRef = useRef(false); // reference to the selection state, default as false 
   const selectionStartRef = useRef<{ x: number; y: number } | null>(null); // reference to the start point of the selection box
 
+  const [editingId, setEditingId] = useState<string | null>(null)
   useEffect(() => {
     stateRef.current = state
   }, [state])
@@ -301,6 +387,16 @@ export const PixiCanvas = () => {
     },
     [mutateElements]
   )
+
+  const handleDoubleClick = useCallback((id: string) => {
+    setEditingId(id)
+  }, [])
+
+  // 处理保存文本
+  const handleCommitText = useCallback((id: string, newText: string) => {
+    updateElement(id, { text: newText })
+    setEditingId(null)
+  }, [updateElement])
 
   useEffect(() => {
     let destroyed = false
@@ -355,12 +451,16 @@ export const PixiCanvas = () => {
       resizeObserverRef.current = resizeObserver
 
       background.on("pointerdown", (event: FederatedPointerEvent) => {
+        //如果在编辑，那么点击背景，不做任何事
+        //之后需要改成退出编辑
+        if (editingId) return
+
         if (stateRef.current.interactionMode === "pan") {
           panRef.current = {
             lastPointer: { x: event.global.x, y: event.global.y },
           }
           background.cursor = "grabbing"
-        } 
+        }
         /* handle area selection */
         else if (stateRef.current.interactionMode === "select") {
           const nativeEvent = event.originalEvent as unknown as MouseEvent;
@@ -384,6 +484,10 @@ export const PixiCanvas = () => {
       })
 
       app.stage.on("pointermove", (event: FederatedPointerEvent) => {
+        //如果在编辑，禁止其他画布交互
+        if(editingId) return 
+
+
         const content = contentRef.current
         if (!content) return
 
@@ -447,6 +551,13 @@ export const PixiCanvas = () => {
       })
 
       const stopInteractions = () => {
+        if(editingId){
+          dragRef.current = null
+          resizeRef.current = null
+          panRef.current = null
+          return
+        }
+
         // branch for area selection when done
         if (isSelectedRef.current && selectionBoxRef.current && selectionStartRef.current) {
           const selectionBox = selectionBoxRef.current;
@@ -523,6 +634,10 @@ export const PixiCanvas = () => {
   const handleElementPointerDown = useCallback(
     (event: FederatedPointerEvent, elementId: string) => {
       event.stopPropagation()
+
+      //编辑状态下，禁止选择其它元素
+      if(editingId) return
+
       if (stateRef.current.interactionMode !== "select") return
       const { selectedIds, elements } = stateRef.current
     const nativeEvent = event.originalEvent as unknown as
@@ -562,6 +677,11 @@ export const PixiCanvas = () => {
   const handleResizeStart = useCallback(
     (event: FederatedPointerEvent, elementId: string, direction: ResizeDirection) => {
       event.stopPropagation()
+
+      //编辑状态下，禁止选择其它元素
+      if(editingId) return
+
+
       if (stateRef.current.interactionMode !== "select") return
       const content = contentRef.current
       if (!content) return
@@ -587,12 +707,21 @@ export const PixiCanvas = () => {
     content.removeChildren().forEach((child) => child.destroy({ children: true }))
     content.sortableChildren = true
     state.elements.forEach((element) => {
+      const isEditingThis = element.id === editingId
+
       const selected = state.selectedIds.includes(element.id)
-      const node = createShape(element, selected, state.interactionMode, (event) =>
-        handleElementPointerDown(event, element.id)
+      //传入双击的回调函数handleDoubleClick
+      const node = createShape(element, selected && !isEditingThis, state.interactionMode, (event) =>
+        handleElementPointerDown(event, element.id),handleDoubleClick
       )
+      if (isEditingThis) {
+          node.alpha = 0 // 编辑时隐藏 Pixi 元素，防止重影
+      }
+
       node.zIndex = 1
       content.addChild(node)
+
+
       if (
         selected &&
         state.selectedIds.length === 1 &&
@@ -746,5 +875,20 @@ export const PixiCanvas = () => {
     background.cursor = state.interactionMode === "pan" ? "grab" : "default"
   }, [state.interactionMode])
 
-  return <div ref={wrapperRef} className="h-full w-full rounded-[32px]" />
+  const editingElement = editingId ? state.elements.find(el => el.id === editingId) : null
+
+  return (
+    <div ref={wrapperRef} className="h-full w-full rounded-[32px] relative">
+      {/* 渲染 HTML 文本编辑器覆盖层 */}
+      {editingElement && editingElement.type === "text" && (
+        <TextEditor
+          element={editingElement}
+          zoom={state.zoom}
+          pan={state.pan}
+          onCommit={handleCommitText}
+          onCancel={() => setEditingId(null)}
+        />
+      )}
+    </div>
+  )
 }
