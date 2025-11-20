@@ -64,10 +64,6 @@ const RESIZE_CURSORS: Record<ResizeDirection, string> = {
 // 元素最小尺寸限制
 const MIN_ELEMENT_SIZE = 0
 
-// 限制元素尺寸不小于最小值
-const clampSize = (value: number) => Math.max(MIN_ELEMENT_SIZE, value)
-
-// 选中框颜色（蓝色）
 const SELECTION_COLOR = 0x39b5ff
 
 // 调整大小手柄激活状态颜色（青色）
@@ -211,8 +207,9 @@ const createShape = async (
     // 创建填充和描边图形对象
     const fill = new Graphics()
     const stroke = new Graphics()
-    const fillColor = hexToNumber(element.fill)      // 转换填充颜色
-    const strokeColor = hexToNumber(element.stroke)    // 转换描边颜色
+    const mask = new Graphics()
+    const fillColor = hexToNumber(element.fill)
+    const strokeColor = hexToNumber(element.stroke)
 
     /**
      * 根据形状类型绘制路径
@@ -249,7 +246,14 @@ const createShape = async (
       }
     }
 
-    // 绘制填充部分
+    // Mask keeps the visible stroke inside the shape without changing stroke alignment.
+    drawPath(mask)
+    mask.fill({ color: 0xffffff, alpha: 1 })
+    mask.alpha = 0
+    mask.eventMode = "none"
+    container.addChild(mask)
+    container.mask = mask
+
     drawPath(fill)
     fill.fill({ color: fillColor, alpha: 1 })
     container.addChild(fill)
@@ -257,20 +261,23 @@ const createShape = async (
     // 如果有描边，绘制描边部分
     if (element.strokeWidth > 0) {
       drawPath(stroke)
-      // 修复：确保描边宽度不会超过图形的最小尺寸，防止溢出
-      const safeStrokeWidth = Math.min(
-        element.strokeWidth,
-        Math.abs(element.width),
-        Math.abs(element.height)
+      // Clamp stroke so it never exceeds half of the smallest dimension to avoid distortion.
+      const halfMinSize =
+        Math.min(Math.abs(element.width), Math.abs(element.height)) / 2
+      const safeStrokeWidth = Math.max(
+        0,
+        Math.min(element.strokeWidth, halfMinSize)
       )
 
-      stroke.stroke({
-        width: safeStrokeWidth,
-        color: strokeColor,
-        alignment: 1,  // 描边对齐方式：1 表示外部对齐
-        join: "round",
-      })
-      container.addChild(stroke)
+      if (safeStrokeWidth > 0) {
+        stroke.stroke({
+          width: safeStrokeWidth,
+          color: strokeColor,
+          alignment: 1,
+          join: "round",
+        })
+        container.addChild(stroke)
+      }
     }
   }
 
@@ -1074,7 +1081,6 @@ export const PixiCanvas = () => {
               )
               break
           }
-
           // 控制柄事件处理
           handle.on("pointerdown", (event) => {
             hovered = true
