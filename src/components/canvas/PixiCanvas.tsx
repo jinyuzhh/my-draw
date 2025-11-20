@@ -45,6 +45,7 @@ const clampSize = (value: number) => Math.max(MIN_ELEMENT_SIZE, value)
 const SELECTION_COLOR = 0x39b5ff
 const HANDLE_ACTIVE_COLOR = 0x00cae0
 
+
 const hexToNumber = (value: string) =>
   Number.parseInt(value.replace("#", ""), 16)
 
@@ -125,11 +126,12 @@ const createShape = (
           )
           break
         case "circle": {
-          const radius = Math.max(
-            Math.min(element.width, element.height) / 2,
-            0
+          target.ellipse(
+            element.width / 2,
+            element.height / 2,
+            element.width / 2,
+            element.height / 2
           )
-          target.circle(element.width / 2, element.height / 2, radius)
           break
         }
         case "triangle":
@@ -147,10 +149,18 @@ const createShape = (
 
     if (element.strokeWidth > 0) {
       drawPath(stroke)
+      // 修复：确保描边宽度不会超过图形的最小尺寸，防止溢出
+      const safeStrokeWidth = Math.min(
+        element.strokeWidth,
+        Math.abs(element.width),
+        Math.abs(element.height)
+      )
+
       stroke.stroke({
-        width: element.strokeWidth,
+        width: safeStrokeWidth,
         color: strokeColor,
         alignment: 1,
+        join: "round",
       })
       container.addChild(stroke)
     }
@@ -253,6 +263,10 @@ export const PixiCanvas = () => {
   const panRef = useRef<{ lastPointer: { x: number; y: number } } | null>(null)
   const stateRef = useRef(state)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
+
+  const selectionBoxRef = useRef<Graphics | null>(null) // reference to the selection box graphics object
+  const isSelectedRef = useRef(false); // reference to the selection state, default as false 
+  const selectionStartRef = useRef<{ x: number; y: number } | null>(null); // reference to the start point of the selection box
 
   useEffect(() => {
     stateRef.current = state
@@ -359,6 +373,24 @@ export const PixiCanvas = () => {
             lastPointer: { x: event.global.x, y: event.global.y },
           }
           background.cursor = "grabbing"
+        } 
+        /* handle area selection */
+        else if (stateRef.current.interactionMode === "select") {
+          const nativeEvent = event.originalEvent as unknown as MouseEvent;
+          if (!(nativeEvent.shiftKey || nativeEvent.metaKey || nativeEvent.ctrlKey) && event.target === background) {
+            // now, start to select area
+            const localPos = event.getLocalPosition(content);
+            selectionStartRef.current = { x: localPos.x, y: localPos.y };
+            isSelectedRef.current = true;
+
+            // now, create the selection box
+            const selectionBox = new Graphics();
+            selectionBox.lineStyle(1, SELECTION_COLOR, 0.8);
+            selectionBox.fill({color: SELECTION_COLOR, alpha: 0.1});
+            selectionBox.zIndex = 100;
+            content.addChild(selectionBox);
+            selectionBoxRef.current = selectionBox;
+          }
         } else {
           clearSelection()
         }
@@ -404,6 +436,29 @@ export const PixiCanvas = () => {
       app.stage.on("pointermove", (event: FederatedPointerEvent) => {
         const content = contentRef.current
         if (!content) return
+
+        // branch for area selection
+        if (isSelectedRef.current && selectionStartRef.current && selectionBoxRef.current) {
+          const localPos = event.getLocalPosition(content);
+          const start = selectionStartRef.current;
+          
+          // how large of this selection box should be?
+          const x = Math.min(start.x, localPos.x);
+          const y = Math.min(start.y, localPos.y);
+          const width = Math.abs(start.x - localPos.x);
+          const height = Math.abs(start.y - localPos.y);
+
+          // now, draw the selection box
+          const selectionBox = selectionBoxRef.current;
+          selectionBox.clear();
+          selectionBox.lineStyle(1, SELECTION_COLOR, 0.8);
+          selectionBox.beginFill(SELECTION_COLOR, 0.1);
+          // selectionBox.fill({color: SELECTION_COLOR, alpha: 0.1});
+          selectionBox.drawRect(x, y, width, height);
+          selectionBox.endFill();
+          return;
+        }
+
         if (resizeRef.current) {
           const current = resizeRef.current
           const local = event.getLocalPosition(content)
@@ -442,6 +497,35 @@ export const PixiCanvas = () => {
       })
 
       const stopInteractions = () => {
+        // branch for area selection when done
+        if (isSelectedRef.current && selectionBoxRef.current && selectionStartRef.current) {
+          const selectionBox = selectionBoxRef.current;
+
+          // get the bounds of the selection box
+          const bounds = selectionBox.getBounds();
+          const selectionRect = new Rectangle(bounds.x, bounds.y, bounds.width, bounds.height);
+
+          // now, find all the elements that intersect with the selection box
+          const selectedElements = stateRef.current.elements.filter(elem => {
+            const elemRect = new Rectangle( elem.x, elem.y, elem.width, elem.height );
+            return selectionRect.intersects(elemRect); // these two elements intersect or not?
+          });
+
+          // now, update the selection state
+          if (selectedElements.length > 0) {
+            setSelection(selectedElements.map((el) => el.id));
+          } else {
+            clearSelection();
+          }
+
+          // now, clear the selection box
+          selectionBox.destroy();
+          selectionBoxRef.current = null;
+        }
+
+        isSelectedRef.current = false;
+        selectionStartRef.current = null;
+
         const background = backgroundRef.current
         if (panRef.current && background) {
           background.cursor = "default"
@@ -489,7 +573,7 @@ export const PixiCanvas = () => {
         handleGlobalWheel = null
       }
     }
-  }, [clearSelection, mutateElements, panBy, registerApp, performResize])
+  }, [clearSelection, mutateElements, panBy, registerApp, performResize, setSelection])
 
   const handleElementPointerDown = useCallback(
     (event: FederatedPointerEvent, elementId: string) => {
