@@ -28,7 +28,7 @@ import {
   ColorMatrixFilter,
   FederatedPointerEvent,
   Rectangle,
-  Texture,
+  Assets,
 } from "pixi.js"
 import type { TextStyleFontWeight } from "pixi.js"
 import { useCanvas } from "../../store/CanvasProvider"
@@ -167,7 +167,7 @@ const getHandlePosition = (
  * 支持的元素类型包括：形状（矩形、圆形、三角形）、文本和图像。
  * 如果元素被选中，会添加选中框轮廓。
  */
-const createShape = (
+const createShape = async (
   element: CanvasElement,
   selected: boolean,
   interactionMode: "select" | "pan",
@@ -286,7 +286,8 @@ const createShape = (
   // 处理图像类型元素
   if (element.type === "image") {
     // 从图像源创建纹理
-    const texture = Texture.from(element.src)
+    const texture = await Assets.load(element.src)
+    // console.log(element.src)
     const sprite = new Sprite(texture)
     
     // 设置精灵属性
@@ -407,22 +408,22 @@ export const PixiCanvas = () => {
   }, [state])
 
   /**
- * 执行元素调整大小操作
- * 
- * @function performResize
- * @param {Object} info - 调整大小信息
- * @param {string} info.id - 要调整大小的元素 ID
- * @param {ResizeDirection} info.direction - 调整大小的方向
- * @param {CanvasElement} info.startElement - 调整开始时的元素状态
- * @param {number} dx - 水平方向上的移动距离
- * @param {number} dy - 垂直方向上的移动距离
- * 
- * @description 
- * 根据调整方向和移动距离计算元素的新尺寸和位置：
- * - 东(e)/西(w)：调整宽度
- * - 南(s)/北(n)：调整高度
- * - 西(w)/北(n)：同时调整位置以保持对边不动
- */
+   * 执行元素调整大小操作
+   * 
+   * @function performResize
+   * @param {Object} info - 调整大小信息
+   * @param {string} info.id - 要调整大小的元素 ID
+   * @param {ResizeDirection} info.direction - 调整大小的方向
+   * @param {CanvasElement} info.startElement - 调整开始时的元素状态
+   * @param {number} dx - 水平方向上的移动距离
+   * @param {number} dy - 垂直方向上的移动距离
+   * 
+   * @description 
+   * 根据调整方向和移动距离计算元素的新尺寸和位置：
+   * - 东(e)/西(w)：调整宽度
+   * - 南(s)/北(n)：调整高度
+   * - 西(w)/北(n)：同时调整位置以保持对边不动
+   */
   const performResize = useCallback(
     (
       info: {
@@ -840,9 +841,9 @@ export const PixiCanvas = () => {
     content.sortableChildren = true
     
     // 为每个元素创建可视化表示
-    state.elements.forEach((element) => {
+    state.elements.forEach(async (element) => {
       const selected = state.selectedIds.includes(element.id)
-      const node = createShape(element, selected, state.interactionMode, (event) =>
+      const node = await createShape(element, selected, state.interactionMode, (event) =>
         handleElementPointerDown(event, element.id)
       )
       node.zIndex = 1
