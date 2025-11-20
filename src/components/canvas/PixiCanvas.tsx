@@ -132,11 +132,12 @@ const createShape = (
           )
           break
         case "circle": {
-          const radius = Math.max(
-            Math.min(element.width, element.height) / 2,
-            0
+          target.ellipse(
+            element.width / 2,
+            element.height / 2,
+            element.width / 2,
+            element.height / 2
           )
-          target.circle(element.width / 2, element.height / 2, radius)
           break
         }
         case "triangle":
@@ -154,10 +155,18 @@ const createShape = (
 
     if (element.strokeWidth > 0) {
       drawPath(stroke)
+      // 修复：确保描边宽度不会超过图形的最小尺寸，防止溢出
+      const safeStrokeWidth = Math.min(
+        element.strokeWidth,
+        Math.abs(element.width),
+        Math.abs(element.height)
+      )
+
       stroke.stroke({
-        width: element.strokeWidth,
+        width: safeStrokeWidth,
         color: strokeColor,
         alignment: 1,
+        join: "round",
       })
       container.addChild(stroke)
     }
@@ -303,6 +312,9 @@ const TextEditor = ({
 
 
 export const PixiCanvas = () => {
+  // 在组件顶部声明全局变量，确保在所有作用域内可用
+  let handleGlobalWheel: ((event: WheelEvent) => void) | null = null;
+
   const {
     state,
     setSelection,
@@ -311,6 +323,8 @@ export const PixiCanvas = () => {
     panBy,
     registerApp,
     updateElement,
+    setZoom,
+
   } = useCanvas()
 
   const wrapperRef = useRef<HTMLDivElement | null>(null)
@@ -483,6 +497,43 @@ export const PixiCanvas = () => {
         }
       })
 
+      // 定义滚轮事件处理函数
+      handleGlobalWheel = (event: WheelEvent) => {
+        // 检查是否按下了ctrl键或meta键（Mac）
+        if (event.ctrlKey || event.metaKey) {
+          // 无论鼠标是否在画布上，都阻止浏览器默认缩放行为
+          event.preventDefault();
+          event.stopPropagation();
+
+          // 获取画布元素
+          const canvas = app.canvas;
+          const rect = canvas.getBoundingClientRect();
+
+          // 检查鼠标是否在画布范围内
+          const isMouseInCanvas = (
+            event.clientX >= rect.left &&
+            event.clientX <= rect.right &&
+            event.clientY >= rect.top &&
+            event.clientY <= rect.bottom
+          );
+
+          // 只有当鼠标在画布上时，才进行画布缩放
+          if (isMouseInCanvas) {
+            // 根据滚轮方向调整缩放比例
+            const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
+            const newZoom = stateRef.current.zoom * zoomFactor;
+
+            // 使用setZoom方法设置新的缩放级别
+            setZoom(newZoom);
+          }
+          // 如果鼠标不在画布上，不执行任何缩放操作，但仍然阻止浏览器的默认缩放行为
+        }
+      };
+
+      // 添加全局滚轮事件监听器
+      window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+
+
       app.stage.on("pointermove", (event: FederatedPointerEvent) => {
         //如果在编辑，禁止其他画布交互
         if(editingId) return 
@@ -628,6 +679,11 @@ export const PixiCanvas = () => {
       appRef.current = null
       contentRef.current = null
       backgroundRef.current = null
+      // 移除全局滚轮事件监听器
+      if (handleGlobalWheel) {
+        window.removeEventListener('wheel', handleGlobalWheel)
+        handleGlobalWheel = null
+      }
     }
   }, [clearSelection, mutateElements, panBy, registerApp, performResize, setSelection])
 
@@ -640,39 +696,39 @@ export const PixiCanvas = () => {
 
       if (stateRef.current.interactionMode !== "select") return
       const { selectedIds, elements } = stateRef.current
-    const nativeEvent = event.originalEvent as unknown as
-      | {
+      const nativeEvent = event.originalEvent as unknown as
+        | {
           shiftKey?: boolean
           metaKey?: boolean
           ctrlKey?: boolean
         }
-      | undefined
-    const additive = Boolean(
-      nativeEvent?.shiftKey || nativeEvent?.metaKey || nativeEvent?.ctrlKey
-    )
-    const selection = additive
-      ? Array.from(new Set([...selectedIds, elementId]))
-      : selectedIds.includes(elementId)
-        ? selectedIds
-        : [elementId]
-    setSelection(selection)
-    const content = contentRef.current
-    if (!content) return
-    const local = event.getLocalPosition(content)
-    const snapshot: Record<string, CanvasElement> = {}
-    elements.forEach((el) => {
-      if (selection.includes(el.id)) {
-        snapshot[el.id] = cloneElement(el)
+        | undefined
+      const additive = Boolean(
+        nativeEvent?.shiftKey || nativeEvent?.metaKey || nativeEvent?.ctrlKey
+      )
+      const selection = additive
+        ? Array.from(new Set([...selectedIds, elementId]))
+        : selectedIds.includes(elementId)
+          ? selectedIds
+          : [elementId]
+      setSelection(selection)
+      const content = contentRef.current
+      if (!content) return
+      const local = event.getLocalPosition(content)
+      const snapshot: Record<string, CanvasElement> = {}
+      elements.forEach((el) => {
+        if (selection.includes(el.id)) {
+          snapshot[el.id] = cloneElement(el)
+        }
+      })
+      dragRef.current = {
+        ids: selection,
+        startPointer: local,
+        snapshot,
+        historySnapshot: cloneElements(elements),
+        moved: false,
       }
-    })
-    dragRef.current = {
-      ids: selection,
-      startPointer: local,
-      snapshot,
-      historySnapshot: cloneElements(elements),
-      moved: false,
-    }
-  }, [setSelection])
+    }, [setSelection])
 
   const handleResizeStart = useCallback(
     (event: FederatedPointerEvent, elementId: string, direction: ResizeDirection) => {
