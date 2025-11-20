@@ -317,7 +317,10 @@ const createShape = async (
       
       // 灰度效果
       if (element.filters.grayscale) {
-        colorMatrix.greyscale(1, false)
+        // colorMatrix.greyscale(1, false)
+        const gray = new ColorMatrixFilter();
+        gray.greyscale(0.5, false);
+        filters.push(gray)        
       }
       
       // 亮度调整
@@ -328,9 +331,8 @@ const createShape = async (
       filters.push(colorMatrix)
     }
     
-    // 应用滤镜（如果有）
-    sprite.filters = filters.length ? filters : undefined
-    
+    sprite.filters = filters.length ? filters : undefined;
+
     // 将遮罩和精灵添加到容器
     container.addChild(mask)
     container.addChild(sprite)
