@@ -45,6 +45,27 @@ const clampSize = (value: number) => Math.max(MIN_ELEMENT_SIZE, value)
 const SELECTION_COLOR = 0x39b5ff
 const HANDLE_ACTIVE_COLOR = 0x00cae0
 
+const getBoundingBox = (elements: CanvasElement[]) => {
+  if (elements.length === 0) return null
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+
+  elements.forEach((el) => {
+    minX = Math.min(minX, el.x)
+    minY = Math.min(minY, el.y)
+    maxX = Math.max(maxX, el.x + el.width)
+    maxY = Math.max(maxY, el.y + el.height)
+  })
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  }
+}
 
 const hexToNumber = (value: string) =>
   Number.parseInt(value.replace("#", ""), 16)
@@ -88,7 +109,6 @@ const getHandlePosition = (
 
 const createShape = (
   element: CanvasElement,
-  selected: boolean,
   interactionMode: "select" | "pan",
   onPointerDown: (event: FederatedPointerEvent) => void
 ) => {
@@ -99,14 +119,7 @@ const createShape = (
   container.eventMode = "static"
   container.cursor = interactionMode === "select" ? "move" : "grab"
   container.hitArea = new Rectangle(0, 0, element.width, element.height)
-
-  if (selected) {
-    const outline = new Graphics()
-    outline.roundRect(0, 0, element.width, element.height, 2)
-    outline.stroke({ width: 1.4, color: SELECTION_COLOR, alpha: 1 })
-    outline.zIndex = 5
-    container.addChild(outline)
-  }
+  container.sortableChildren = true
 
   if (element.type === "shape") {
     const fill = new Graphics()
@@ -253,10 +266,11 @@ export const PixiCanvas = () => {
     moved: boolean
   } | null>(null)
   const resizeRef = useRef<{
-    id: string
+    ids: string[]
     direction: ResizeDirection
     startPointer: { x: number; y: number }
-    startElement: CanvasElement
+    startElements: Record<string, CanvasElement>
+    startBounds: { x: number; y: number; width: number; height: number }
     historySnapshot: CanvasElement[]
     moved: boolean
   } | null>(null)
@@ -275,40 +289,57 @@ export const PixiCanvas = () => {
   const performResize = useCallback(
     (
       info: {
-        id: string
+        ids: string[]
         direction: ResizeDirection
-        startElement: CanvasElement
+        startElements: Record<string, CanvasElement>
+        startBounds: { x: number; y: number; width: number; height: number }
       },
       dx: number,
       dy: number
     ) => {
-      const { direction, startElement, id } = info
-      let { x, y, width, height } = startElement
-
+      const { direction, startElements, startBounds, ids } = info
+      
+      // 计算新的包围盒
+      const newBounds = { ...startBounds }
+      
       if (direction.includes("e")) {
-        width = clampSize(startElement.width + dx)
+        newBounds.width = Math.max(MIN_ELEMENT_SIZE, startBounds.width + dx)
       }
       if (direction.includes("s")) {
-        height = clampSize(startElement.height + dy)
+        newBounds.height = Math.max(MIN_ELEMENT_SIZE, startBounds.height + dy)
       }
       if (direction.includes("w")) {
-        const updatedWidth = clampSize(startElement.width - dx)
-        const delta = startElement.width - updatedWidth
-        width = updatedWidth
-        x = startElement.x + delta
+        const updatedWidth = Math.max(MIN_ELEMENT_SIZE, startBounds.width - dx)
+        const delta = startBounds.width - updatedWidth
+        newBounds.width = updatedWidth
+        newBounds.x = startBounds.x + delta
       }
       if (direction.includes("n")) {
-        const updatedHeight = clampSize(startElement.height - dy)
-        const delta = startElement.height - updatedHeight
-        height = updatedHeight
-        y = startElement.y + delta
+        const updatedHeight = Math.max(MIN_ELEMENT_SIZE, startBounds.height - dy)
+        const delta = startBounds.height - updatedHeight
+        newBounds.height = updatedHeight
+        newBounds.y = startBounds.y + delta
       }
+
+      // 计算缩放比例
+      const scaleX = startBounds.width > 0 ? newBounds.width / startBounds.width : 1
+      const scaleY = startBounds.height > 0 ? newBounds.height / startBounds.height : 1
 
       mutateElements(
         (elements) =>
-          elements.map((el) =>
-            el.id === id ? { ...el, x, y, width, height } : el
-          ) as CanvasElement[],
+          elements.map((el) => {
+            if (!ids.includes(el.id)) return el
+            const startEl = startElements[el.id]
+            if (!startEl) return el
+
+            // 计算新位置和大小
+            const newX = newBounds.x + (startEl.x - startBounds.x) * scaleX
+            const newY = newBounds.y + (startEl.y - startBounds.y) * scaleY
+            const newWidth = Math.max(MIN_ELEMENT_SIZE, startEl.width * scaleX)
+            const newHeight = Math.max(MIN_ELEMENT_SIZE, startEl.height * scaleY)
+
+            return { ...el, x: newX, y: newY, width: newWidth, height: newHeight }
+          }) as CanvasElement[],
         { recordHistory: false }
       )
     },
@@ -453,7 +484,7 @@ export const PixiCanvas = () => {
           selectionBox.clear();
           selectionBox.lineStyle(1, SELECTION_COLOR, 0.8);
           selectionBox.beginFill(SELECTION_COLOR, 0.1);
-          // selectionBox.fill({color: SELECTION_COLOR, alpha: 0.1});
+          selectionBox.fill({color: SELECTION_COLOR, alpha: 0.1});
           selectionBox.drawRect(x, y, width, height);
           selectionBox.endFill();
           return;
@@ -615,20 +646,59 @@ export const PixiCanvas = () => {
     }, [setSelection])
 
   const handleResizeStart = useCallback(
-    (event: FederatedPointerEvent, elementId: string, direction: ResizeDirection) => {
+    (event: FederatedPointerEvent, ids: string[], direction: ResizeDirection) => {
       event.stopPropagation()
       if (stateRef.current.interactionMode !== "select") return
       const content = contentRef.current
       if (!content) return
-      const element = stateRef.current.elements.find((el) => el.id === elementId)
-      if (!element) return
+      
+      const elements = stateRef.current.elements.filter(el => ids.includes(el.id))
+      if (elements.length === 0) return
+
+      const startElements: Record<string, CanvasElement> = {}
+      elements.forEach(el => {
+        startElements[el.id] = cloneElement(el)
+      })
+
+      const bounds = getBoundingBox(elements)
+      if (!bounds) return
+
       const local = event.getLocalPosition(content)
       resizeRef.current = {
-        id: elementId,
+        ids,
         direction,
         startPointer: local,
-        startElement: cloneElement(element),
+        startElements,
+        startBounds: bounds,
         historySnapshot: cloneElements(stateRef.current.elements),
+        moved: false,
+      }
+    },
+    []
+  )
+
+  const handleSelectionBoxPointerDown = useCallback(
+    (event: FederatedPointerEvent) => {
+      event.stopPropagation()
+      if (stateRef.current.interactionMode !== "select") return
+
+      const { selectedIds, elements } = stateRef.current
+      const content = contentRef.current
+      if (!content) return
+
+      const local = event.getLocalPosition(content)
+      const snapshot: Record<string, CanvasElement> = {}
+      elements.forEach((el) => {
+        if (selectedIds.includes(el.id)) {
+          snapshot[el.id] = cloneElement(el)
+        }
+      })
+
+      dragRef.current = {
+        ids: selectedIds,
+        startPointer: local,
+        snapshot,
+        historySnapshot: cloneElements(elements),
         moved: false,
       }
     },
@@ -641,144 +711,219 @@ export const PixiCanvas = () => {
     if (!content || !app) return
     content.removeChildren().forEach((child) => child.destroy({ children: true }))
     content.sortableChildren = true
+    
+    // 1. 渲染所有元素和单选框
     state.elements.forEach((element) => {
       const selected = state.selectedIds.includes(element.id)
-      const node = createShape(element, selected, state.interactionMode, (event) =>
+      const node = createShape(element, state.interactionMode, (event) =>
         handleElementPointerDown(event, element.id)
       )
       node.zIndex = 1
       content.addChild(node)
-      if (
-        selected &&
-        state.selectedIds.length === 1 &&
-        state.interactionMode === "select"
-      ) {
-        const handlesLayer = new Container()
-        handlesLayer.sortableChildren = true
-        handlesLayer.zIndex = 10
-        handlesLayer.position.set(element.x, element.y)
-        handlesLayer.angle = element.rotation
-        const handleSize = Math.max(6, 10 / state.zoom)
-        const edgeThickness = Math.max(16 / state.zoom, handleSize * 1.6)
-        const activeDirection = resizeRef.current?.direction ?? null
 
-        const drawHandle = (
-          target: Graphics,
-          direction: ResizeDirection,
-          opts: { hovered: boolean; active: boolean }
-        ) => {
-          const { hovered, active } = opts
-          const isHighlighted = hovered || active
-          const fill = isHighlighted ? HANDLE_ACTIVE_COLOR : 0xffffff
-          const stroke = isHighlighted ? HANDLE_ACTIVE_COLOR : SELECTION_COLOR
-          target.clear()
-          if (direction === "n" || direction === "s") {
-            target.roundRect(
-              -handleSize,
-              -handleSize / 2,
-              handleSize * 2,
-              handleSize,
-              4
-            )
-          } else if (direction === "e" || direction === "w") {
-            target.roundRect(
-              -handleSize / 2,
-              -handleSize,
-              handleSize,
-              handleSize * 2,
-              4
-            )
-          } else {
-            target.roundRect(
-              -handleSize / 2,
-              -handleSize / 2,
-              handleSize,
-              handleSize,
-              4
-            )
-          }
-          target.fill({ color: fill })
-          target.stroke({ width: active ? 1.6 : 1, color: stroke })
+      if (selected) {
+        const outline = new Graphics()
+        outline.roundRect(0, 0, element.width, element.height, 2)
+        outline.stroke({ width: 1.4, color: SELECTION_COLOR, alpha: 1 })
+        outline.position.set(element.x, element.y)
+        outline.angle = element.rotation
+        outline.zIndex = 2
+        content.addChild(outline)
+      }
+    })
+
+    // 2. 渲染控制点和多选包围盒
+    if (
+      state.interactionMode === "select" &&
+      state.selectedIds.length > 0
+    ) {
+      const selectedElements = state.elements.filter((el) =>
+        state.selectedIds.includes(el.id)
+      )
+      
+      if (selectedElements.length === 0) return
+
+      // 计算包围盒
+      let bounds = { x: 0, y: 0, width: 0, height: 0, rotation: 0 }
+      const isMultiSelection = selectedElements.length > 1
+
+      if (isMultiSelection) {
+        const box = getBoundingBox(selectedElements)
+        if (box) {
+          bounds = { ...box, rotation: 0 }
         }
+      } else {
+        const el = selectedElements[0]
+        bounds = { x: el.x, y: el.y, width: el.width, height: el.height, rotation: el.rotation }
+      }
 
-        RESIZE_DIRECTIONS.forEach((direction) => {
-          const handle = new Graphics()
-          handle.eventMode = "static"
-          handle.cursor = RESIZE_CURSORS[direction]
-          handle.zIndex = 2
-          let hovered = false
-          const isActive = activeDirection === direction
-          const updateStyle = (forcedActive?: boolean) =>
-            drawHandle(handle, direction, {
-              hovered,
-              active: forcedActive ?? isActive,
-            })
-          updateStyle()
-          const pos = getHandlePosition(direction, element.width, element.height)
-          handle.position.set(pos.x, pos.y)
-          handle.visible = !activeDirection || isActive
+      // 绘制多选包围盒
+      if (isMultiSelection) {
+        const box = new Graphics()
+        const dash = 5
+        const gap = 3
+        
+        const drawDashedLine = (x1: number, y1: number, x2: number, y2: number) => {
+           const dx = x2 - x1
+           const dy = y2 - y1
+           const len = Math.sqrt(dx*dx + dy*dy)
+           const count = Math.floor(len / (dash + gap))
+           const dashX = dx / len * dash
+           const dashY = dy / len * dash
+           const gapX = dx / len * gap
+           const gapY = dy / len * gap
+           
+           let cx = x1
+           let cy = y1
+           
+           for (let i = 0; i < count; i++) {
+             box.moveTo(cx, cy)
+             box.lineTo(cx + dashX, cy + dashY)
+             cx += dashX + gapX
+             cy += dashY + gapY
+           }
+           if (Math.sqrt((x2-cx)*(x2-cx) + (y2-cy)*(y2-cy)) > 0) {
+              box.moveTo(cx, cy)
+              box.lineTo(x2, y2)
+           }
+        }
+        
+        drawDashedLine(0, 0, bounds.width, 0)
+        drawDashedLine(bounds.width, 0, bounds.width, bounds.height)
+        drawDashedLine(bounds.width, bounds.height, 0, bounds.height)
+        drawDashedLine(0, bounds.height, 0, 0)
 
-          switch (direction) {
-            case "n":
-              handle.hitArea = new Rectangle(
-                -element.width / 2,
-                -edgeThickness,
-                element.width,
-                edgeThickness * 2
-              )
-              break
-            case "s":
-              handle.hitArea = new Rectangle(
-                -element.width / 2,
-                -edgeThickness,
-                element.width,
-                edgeThickness * 2
-              )
-              break
-            case "e":
-              handle.hitArea = new Rectangle(
-                -edgeThickness,
-                -element.height / 2,
-                edgeThickness * 2,
-                element.height
-              )
-              break
-            case "w":
-              handle.hitArea = new Rectangle(
-                -edgeThickness,
-                -element.height / 2,
-                edgeThickness * 2,
-                element.height
-              )
-              break
-            default:
-              handle.hitArea = new Rectangle(
+        box.stroke({ width: 2, color: SELECTION_COLOR, alpha: 1 })
+        box.position.set(bounds.x, bounds.y)
+        box.zIndex = 3
+        
+        // Make box interactive for dragging
+        box.eventMode = "static"
+        box.cursor = "move"
+        box.hitArea = new Rectangle(0, 0, bounds.width, bounds.height)
+        box.on("pointerdown", handleSelectionBoxPointerDown)
+
+        content.addChild(box)
+      }
+
+      // 绘制控制点
+      if (!dragRef.current?.moved) {
+      const handlesLayer = new Container()
+      handlesLayer.sortableChildren = true
+      handlesLayer.zIndex = 10
+      handlesLayer.position.set(bounds.x, bounds.y)
+      handlesLayer.angle = bounds.rotation
+
+      const handleSize = Math.max(6, 10 / state.zoom)
+      const edgeThickness = Math.max(16 / state.zoom, handleSize * 1.6)
+      const activeDirection = resizeRef.current?.direction ?? null
+
+      // 确定显示的控制点方向
+      const directions = isMultiSelection
+        ? (["nw", "ne", "sw", "se"] as ResizeDirection[])
+        : RESIZE_DIRECTIONS
+
+      const drawHandle = (
+        target: Graphics,
+        direction: ResizeDirection,
+        opts: { hovered: boolean; active: boolean }
+      ) => {
+        const { hovered, active } = opts
+        const isHighlighted = hovered || active
+        const fill = isHighlighted ? HANDLE_ACTIVE_COLOR : 0xffffff
+        const stroke = isHighlighted ? HANDLE_ACTIVE_COLOR : SELECTION_COLOR
+        target.clear()
+        
+        // 只有单选且非角点时才绘制长条形，多选只绘制方形点
+        if (!isMultiSelection && (direction === "n" || direction === "s")) {
+          target.roundRect(-handleSize, -handleSize / 2, handleSize * 2, handleSize, 4)
+        } else if (!isMultiSelection && (direction === "e" || direction === "w")) {
+          target.roundRect(-handleSize / 2, -handleSize, handleSize, handleSize * 2, 4)
+        } else {
+          target.roundRect(-handleSize / 2, -handleSize / 2, handleSize, handleSize, 4)
+        }
+        
+        target.fill({ color: fill })
+        target.stroke({ width: active ? 1.6 : 1, color: stroke })
+      }
+
+      directions.forEach((direction) => {
+        const handle = new Graphics()
+        handle.eventMode = "static"
+        handle.cursor = RESIZE_CURSORS[direction]
+        handle.zIndex = 2
+        let hovered = false
+        const isActive = activeDirection === direction
+        
+        const updateStyle = (forcedActive?: boolean) =>
+          drawHandle(handle, direction, {
+            hovered,
+            active: forcedActive ?? isActive,
+          })
+        
+        updateStyle()
+        
+        const pos = getHandlePosition(direction, bounds.width, bounds.height)
+        handle.position.set(pos.x, pos.y)
+        handle.visible = !activeDirection || isActive
+
+        // HitArea 逻辑
+        if (isMultiSelection) {
+             handle.hitArea = new Rectangle(
                 -edgeThickness / 2,
                 -edgeThickness / 2,
                 edgeThickness,
                 edgeThickness
               )
-              break
-          }
+        } else {
+             switch (direction) {
+                case "n":
+                case "s":
+                  handle.hitArea = new Rectangle(
+                    -bounds.width / 2,
+                    -edgeThickness,
+                    bounds.width,
+                    edgeThickness * 2
+                  )
+                  break
+                case "e":
+                case "w":
+                  handle.hitArea = new Rectangle(
+                    -edgeThickness,
+                    -bounds.height / 2,
+                    edgeThickness * 2,
+                    bounds.height
+                  )
+                  break
+                default:
+                  handle.hitArea = new Rectangle(
+                    -edgeThickness / 2,
+                    -edgeThickness / 2,
+                    edgeThickness,
+                    edgeThickness
+                  )
+                  break
+             }
+        }
 
-          handle.on("pointerdown", (event) => {
-            hovered = true
-            updateStyle(true)
-            handleResizeStart(event, element.id, direction)
-          })
-          handle.on("pointerover", () => {
-            hovered = true
-            if (!isActive) updateStyle()
-          })
-          handle.on("pointerout", () => {
-            hovered = false
-            if (!isActive) updateStyle()
-          })
-          handlesLayer.addChild(handle)
+        handle.on("pointerdown", (event) => {
+          hovered = true
+          updateStyle(true)
+          handleResizeStart(event, state.selectedIds, direction)
         })
-        content.addChild(handlesLayer)
+        handle.on("pointerover", () => {
+          hovered = true
+          if (!isActive) updateStyle()
+        })
+        handle.on("pointerout", () => {
+          hovered = false
+          if (!isActive) updateStyle()
+        })
+        handlesLayer.addChild(handle)
+      })
+      content.addChild(handlesLayer)
       }
-    })
+    }
   }, [
     state.elements,
     state.selectedIds,
@@ -786,6 +931,7 @@ export const PixiCanvas = () => {
     state.zoom,
     handleElementPointerDown,
     handleResizeStart,
+    handleSelectionBoxPointerDown,
   ])
 
   useEffect(() => {
