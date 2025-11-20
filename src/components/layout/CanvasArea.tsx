@@ -145,7 +145,7 @@ export const CanvasArea = () => {
       window.removeEventListener("keydown", handleKeyDown)
       window.removeEventListener("keyup", handleKeyUp)
     }
-  }, [setInteractionMode,copy,paste]) // 依赖项：当这些方法改变时重新绑定事件
+  }, [setInteractionMode,copy,paste,deleteSelected]) // 依赖项：当这些方法改变时重新绑定事件
 
   return (
     // 画布区域主容器，占据剩余空间并设置背景样式

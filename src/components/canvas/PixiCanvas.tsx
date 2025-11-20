@@ -16,7 +16,7 @@
  * @version 1.0.0
  */
 
-import { useEffect, useRef, useCallback } from "react"
+import { useEffect, useRef, useCallback, useState } from "react"
 import {
   Application,
   Container,
@@ -73,6 +73,27 @@ const SELECTION_COLOR = 0x39b5ff
 // 调整大小手柄激活状态颜色（青色）
 const HANDLE_ACTIVE_COLOR = 0x00cae0
 
+const getBoundingBox = (elements: CanvasElement[]) => {
+  if (elements.length === 0) return null
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+
+  elements.forEach((el) => {
+    minX = Math.min(minX, el.x)
+    minY = Math.min(minY, el.y)
+    maxX = Math.max(maxX, el.x + el.width)
+    maxY = Math.max(maxY, el.y + el.height)
+  })
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  }
+}
 
 /**
  * 将十六进制颜色字符串转换为数字
@@ -169,7 +190,6 @@ const getHandlePosition = (
  */
 const createShape = async (
   element: CanvasElement,
-  selected: boolean,
   interactionMode: "select" | "pan",
   onPointerDown: (event: FederatedPointerEvent) => void
 ) => {
@@ -185,15 +205,6 @@ const createShape = async (
   container.eventMode = "static"                // 启用事件交互
   container.cursor = interactionMode === "select" ? "move" : "grab"  // 根据模式设置鼠标样式
   container.hitArea = new Rectangle(0, 0, element.width, element.height)  // 设置点击区域
-
-  // 如果元素被选中，添加选中框轮廓
-  if (selected) {
-    const outline = new Graphics()
-    outline.roundRect(0, 0, element.width, element.height, 2)  // 绘制圆角矩形轮廓
-    outline.stroke({ width: 1.4, color: SELECTION_COLOR, alpha: 1 })  // 设置轮廓样式
-    outline.zIndex = 5  // 设置层级，确保轮廓在元素上方
-    container.addChild(outline)
-  }
 
   // 处理形状类型元素（矩形、圆形、三角形）
   if (element.type === "shape") {
@@ -220,13 +231,13 @@ const createShape = async (
             Math.max(element.cornerRadius, 0)  // 确保圆角半径不为负
           )
           break
-        case "circle": {   // 圆形
-          // 计算半径，取宽高中的较小值的一半
-          const radius = Math.max(
-            Math.min(element.width, element.height) / 2,
-            0
+        case "circle": {
+          target.ellipse(
+            element.width / 2,
+            element.height / 2,
+            element.width / 2,
+            element.height / 2
           )
-          target.circle(element.width / 2, element.height / 2, radius)
           break
         }
         case "triangle":  // 三角形
@@ -246,10 +257,18 @@ const createShape = async (
     // 如果有描边，绘制描边部分
     if (element.strokeWidth > 0) {
       drawPath(stroke)
+      // 修复：确保描边宽度不会超过图形的最小尺寸，防止溢出
+      const safeStrokeWidth = Math.min(
+        element.strokeWidth,
+        Math.abs(element.width),
+        Math.abs(element.height)
+      )
+
       stroke.stroke({
-        width: element.strokeWidth,
+        width: safeStrokeWidth,
         color: strokeColor,
         alignment: 1,  // 描边对齐方式：1 表示外部对齐
+        join: "round",
       })
       container.addChild(stroke)
     }
@@ -359,14 +378,19 @@ const createShape = async (
  * 5. 实现区域选择功能
  */
 export const PixiCanvas = () => {
+  // 在组件顶部声明全局变量，确保在所有作用域内可用
+  let handleGlobalWheel: ((event: WheelEvent) => void) | null = null;
+
   // 从 Canvas Context 获取状态和方法
   const {
     state,              // 画布状态（元素列表、选中项、缩放等）
+    isInitialized,      // 获取初始状态
     setSelection,       // 设置选中元素
     clearSelection,     // 清除选中状态
     mutateElements,     // 修改元素属性
     panBy,              // 平移画布
     registerApp,        // 注册 PixiJS 应用实例
+    setZoom,
   } = useCanvas()
   
   // DOM 和 PixiJS 对象引用
@@ -385,24 +409,30 @@ export const PixiCanvas = () => {
   } | null>(null)                                    // 拖动操作状态引用
   
   const resizeRef = useRef<{
-    id: string                                      // 正在调整大小的元素 ID
-    direction: ResizeDirection                      // 调整大小的方向
-    startPointer: { x: number; y: number }          // 调整开始时的指针位置
-    startElement: CanvasElement                     // 调整开始时的元素状态
-    historySnapshot: CanvasElement[]                // 调整开始时的历史记录快照
-    moved: boolean                                  // 是否已调整大小
-  } | null>(null)                                    // 调整大小操作状态引用
-  
-  const panRef = useRef<{ lastPointer: { x: number; y: number } } | null>(null)  // 平移操作状态引用
-  
-  // 状态同步和观察器引用
-  const stateRef = useRef(state)                     // 状态引用（用于在回调中获取最新状态）
-  const resizeObserverRef = useRef<ResizeObserver | null>(null)  // 容器大小变化观察器引用
+    ids: string[]                                                           // 正在调整大小的元素 ID
+    direction: ResizeDirection                                              // 调整大小的方向
+    startPointer: { x: number; y: number }                                  // 调整开始时的指针位置
+    startElements: Record<string, CanvasElement>                            // 调整开始时的元素状态
+    startBounds: { x: number; y: number; width: number; height: number }
+    historySnapshot: CanvasElement[]                                        // 调整开始时的历史记录快照
+    moved: boolean                                                          // 是否已调整大小
+  } | null>(null)
+  const panRef = useRef<{ lastPointer: { x: number; y: number } } | null>(null)
+  const stateRef = useRef(state)
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
 
-  // 区域选择相关引用
-  const selectionBoxRef = useRef<Graphics | null>(null)          // 选择框图形对象引用
-  const isSelectedRef = useRef(false)                           // 是否正在区域选择状态
-  const selectionStartRef = useRef<{ x: number; y: number } | null>(null)  // 区域选择开始位置
+  const selectionBoxRef = useRef<Graphics | null>(null) // reference to the selection box graphics object
+  const isSelectedRef = useRef(false); // reference to the selection state, default as false 
+  const selectionStartRef = useRef<{ x: number; y: number } | null>(null); // reference to the start point of the selection box
+
+  const [renderPage, setRenderPage] = useState(0); // 用于触发页面渲染
+
+  useEffect(() => {
+    if (isInitialized && state.elements.length > 0) {
+      // 初始化成功，进行渲染
+      setRenderPage(prev => prev + 1)
+    }
+  }, [isInitialized, state.elements.length])
 
   // 同步状态到引用，确保在回调中获取最新状态
   useEffect(() => {
@@ -429,45 +459,61 @@ export const PixiCanvas = () => {
   const performResize = useCallback(
     (
       info: {
-        id: string
+        ids: string[]
         direction: ResizeDirection
-        startElement: CanvasElement
+        startElements: Record<string, CanvasElement>
+        startBounds: { x: number; y: number; width: number; height: number }
       },
       dx: number,
       dy: number
     ) => {
-      const { direction, startElement, id } = info
-      let { x, y, width, height } = startElement
-
-      // 东方向：调整右边界
+      const { direction, startElements, startBounds, ids } = info
+      
+      // 计算新的包围盒
+      const newBounds = { ...startBounds }
+      
       if (direction.includes("e")) {
-        width = clampSize(startElement.width + dx)
+        newBounds.width = Math.max(MIN_ELEMENT_SIZE, startBounds.width + dx)
       }
       // 南方向：调整下边界
       if (direction.includes("s")) {
-        height = clampSize(startElement.height + dy)
+        newBounds.height = Math.max(MIN_ELEMENT_SIZE, startBounds.height + dy)
       }
       // 西方向：调整左边界，同时移动位置
       if (direction.includes("w")) {
-        const updatedWidth = clampSize(startElement.width - dx)
-        const delta = startElement.width - updatedWidth
-        width = updatedWidth
-        x = startElement.x + delta
+        const updatedWidth = Math.max(MIN_ELEMENT_SIZE, startBounds.width - dx)
+        const delta = startBounds.width - updatedWidth
+        newBounds.width = updatedWidth
+        newBounds.x = startBounds.x + delta
       }
       // 北方向：调整上边界，同时移动位置
       if (direction.includes("n")) {
-        const updatedHeight = clampSize(startElement.height - dy)
-        const delta = startElement.height - updatedHeight
-        height = updatedHeight
-        y = startElement.y + delta
+        const updatedHeight = Math.max(MIN_ELEMENT_SIZE, startBounds.height - dy)
+        const delta = startBounds.height - updatedHeight
+        newBounds.height = updatedHeight
+        newBounds.y = startBounds.y + delta
       }
+
+      // 计算缩放比例
+      const scaleX = startBounds.width > 0 ? newBounds.width / startBounds.width : 1
+      const scaleY = startBounds.height > 0 ? newBounds.height / startBounds.height : 1
 
       // 应用新的尺寸和位置
       mutateElements(
         (elements) =>
-          elements.map((el) =>
-            el.id === id ? { ...el, x, y, width, height } : el
-          ) as CanvasElement[],
+          elements.map((el) => {
+            if (!ids.includes(el.id)) return el
+            const startEl = startElements[el.id]
+            if (!startEl) return el
+
+            // 计算新位置和大小
+            const newX = newBounds.x + (startEl.x - startBounds.x) * scaleX
+            const newY = newBounds.y + (startEl.y - startBounds.y) * scaleY
+            const newWidth = Math.max(MIN_ELEMENT_SIZE, startEl.width * scaleX)
+            const newHeight = Math.max(MIN_ELEMENT_SIZE, startEl.height * scaleY)
+
+            return { ...el, x: newX, y: newY, width: newWidth, height: newHeight }
+          }) as CanvasElement[],
         { recordHistory: false }
       )
     },
@@ -540,6 +586,11 @@ export const PixiCanvas = () => {
       backgroundRef.current = background
       registerApp(app)
 
+      // 立即渲染现有元素
+      if (stateRef.current.elements.length > 0) {
+        renderElements(content, stateRef.current.elements, stateRef.current)
+      }
+
       // 设置容器大小变化观察器
       const resizeObserver = new ResizeObserver(() => {
         app.resize()
@@ -581,6 +632,42 @@ export const PixiCanvas = () => {
         }
       })
 
+      // 定义滚轮事件处理函数
+      const handleGlobalWheel = (event: WheelEvent) => {
+        // 检查是否按下了ctrl键或meta键（Mac）
+        if (event.ctrlKey || event.metaKey) {
+          // 无论鼠标是否在画布上，都阻止浏览器默认缩放行为
+          event.preventDefault();
+          event.stopPropagation();
+
+          // 获取画布元素
+          const canvas = app.canvas;
+          const rect = canvas.getBoundingClientRect();
+
+          // 检查鼠标是否在画布范围内
+          const isMouseInCanvas = (
+            event.clientX >= rect.left &&
+            event.clientX <= rect.right &&
+            event.clientY >= rect.top &&
+            event.clientY <= rect.bottom
+          );
+
+          // 只有当鼠标在画布上时，才进行画布缩放
+          if (isMouseInCanvas) {
+            // 根据滚轮方向调整缩放比例
+            const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
+            const newZoom = stateRef.current.zoom * zoomFactor;
+
+            // 使用setZoom方法设置新的缩放级别
+            setZoom(newZoom);
+          }
+          // 如果鼠标不在画布上，不执行任何缩放操作，但仍然阻止浏览器的默认缩放行为
+        }
+      };
+
+      // 添加全局滚轮事件监听器
+      window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+
       // 舞台指针移动事件处理
       app.stage.on("pointermove", (event: FederatedPointerEvent) => {
         const content = contentRef.current
@@ -602,6 +689,7 @@ export const PixiCanvas = () => {
           selectionBox.clear();
           selectionBox.lineStyle(1, SELECTION_COLOR, 0.8);
           selectionBox.beginFill(SELECTION_COLOR, 0.1);
+          selectionBox.fill({color: SELECTION_COLOR, alpha: 0.1});
           selectionBox.drawRect(x, y, width, height);
           selectionBox.endFill();
           return;
@@ -729,8 +817,13 @@ export const PixiCanvas = () => {
       appRef.current = null
       contentRef.current = null
       backgroundRef.current = null
+      // 移除全局滚轮事件监听器
+      if (handleGlobalWheel) {
+        window.removeEventListener('wheel', handleGlobalWheel)
+        handleGlobalWheel = null
+      }
     }
-  }, [clearSelection, mutateElements, panBy, registerApp, performResize, setSelection])
+  }, [clearSelection, mutateElements, panBy, registerApp, performResize, setSelection, renderPage])
 
   /**
  * 处理元素指针按下事件
@@ -750,43 +843,43 @@ export const PixiCanvas = () => {
       event.stopPropagation()
       if (stateRef.current.interactionMode !== "select") return
       const { selectedIds, elements } = stateRef.current
-    const nativeEvent = event.originalEvent as unknown as
-      | {
+      const nativeEvent = event.originalEvent as unknown as
+        | {
           shiftKey?: boolean
           metaKey?: boolean
           ctrlKey?: boolean
         }
-      | undefined
-    // 检查是否按下了修饰键（Shift/Ctrl/Cmd），用于多选
-    const additive = Boolean(
-      nativeEvent?.shiftKey || nativeEvent?.metaKey || nativeEvent?.ctrlKey
-    )
-    // 计算新的选择状态
-    const selection = additive
-      ? Array.from(new Set([...selectedIds, elementId]))  // 添加到现有选择
-      : selectedIds.includes(elementId)
-        ? selectedIds                                      // 已选中则保持不变
-        : [elementId]                                      // 否则只选中当前元素
-    setSelection(selection)
-    const content = contentRef.current
-    if (!content) return
-    const local = event.getLocalPosition(content)
-    // 创建选中元素的快照，用于拖动时的位置计算
-    const snapshot: Record<string, CanvasElement> = {}
-    elements.forEach((el) => {
-      if (selection.includes(el.id)) {
-        snapshot[el.id] = cloneElement(el)
+        | undefined
+      // 检查是否按下了修饰键（Shift/Ctrl/Cmd），用于多选
+      const additive = Boolean(
+        nativeEvent?.shiftKey || nativeEvent?.metaKey || nativeEvent?.ctrlKey
+      )
+      // 计算新的选择状态
+      const selection = additive
+        ? Array.from(new Set([...selectedIds, elementId]))  // 添加到现有选择
+        : selectedIds.includes(elementId)
+          ? selectedIds                                      // 已选中则保持不变
+          : [elementId]                                      // 否则只选中当前元素
+      setSelection(selection)
+      const content = contentRef.current
+      if (!content) return
+      const local = event.getLocalPosition(content)
+      // 创建选中元素的快照，用于拖动时的位置计算
+      const snapshot: Record<string, CanvasElement> = {}
+      elements.forEach((el) => {
+        if (selection.includes(el.id)) {
+          snapshot[el.id] = cloneElement(el)
+        }
+      })
+      // 初始化拖动状态
+      dragRef.current = {
+        ids: selection,
+        startPointer: local,
+        snapshot,
+        historySnapshot: cloneElements(elements),
+        moved: false,
       }
-    })
-    // 初始化拖动状态
-    dragRef.current = {
-      ids: selection,
-      startPointer: local,
-      snapshot,
-      historySnapshot: cloneElements(elements),
-      moved: false,
-    }
-  }, [setSelection])
+    }, [setSelection])
 
   /**
  * 处理调整大小开始事件
@@ -803,59 +896,64 @@ export const PixiCanvas = () => {
  * 3. 记录初始状态和指针位置
  */
   const handleResizeStart = useCallback(
-    (event: FederatedPointerEvent, elementId: string, direction: ResizeDirection) => {
+    (event: FederatedPointerEvent, ids: string[], direction: ResizeDirection) => {
       event.stopPropagation()
       if (stateRef.current.interactionMode !== "select") return
       const content = contentRef.current
       if (!content) return
-      const element = stateRef.current.elements.find((el) => el.id === elementId)
-      if (!element) return
+      
+      const elements = stateRef.current.elements.filter(el => ids.includes(el.id))
+      if (elements.length === 0) return
+
+      const startElements: Record<string, CanvasElement> = {}
+      elements.forEach(el => {
+        startElements[el.id] = cloneElement(el)
+      })
+
+      const bounds = getBoundingBox(elements)
+      if (!bounds) return
+
       const local = event.getLocalPosition(content)
       // 初始化调整大小状态
       resizeRef.current = {
-        id: elementId,
+        ids,
         direction,
         startPointer: local,
-        startElement: cloneElement(element),  // 保存元素初始状态
-        historySnapshot: cloneElements(stateRef.current.elements),  // 保存历史快照
+        startElements,
+        startBounds: bounds,
+        historySnapshot: cloneElements(stateRef.current.elements),
         moved: false,
       }
     },
     []
   )
 
-  /**
- * 渲染画布元素和选择控制柄
- * 
- * @description 
- * 当元素列表、选择状态或交互模式变化时：
- * 1. 清除现有内容
- * 2. 为每个元素创建可视化表示
- * 3. 为选中的单个元素添加调整大小控制柄
- */
-  useEffect(() => {
-    const content = contentRef.current
-    const app = appRef.current
-    if (!content || !app) return
-    // 清除现有内容并销毁子对象
+  // 添加 renderElements 函数
+  const renderElements = useCallback((
+    content: Container, 
+    elements: CanvasElement[], 
+    currentState: typeof state
+  ) => {
     content.removeChildren().forEach((child) => child.destroy({ children: true }))
     // 启用子元素排序（用于控制柄层级）
     content.sortableChildren = true
     
     // 为每个元素创建可视化表示
-    state.elements.forEach(async (element) => {
+    
+    elements.forEach(async (element) => {
       const selected = state.selectedIds.includes(element.id)
-      const node = await createShape(element, selected, state.interactionMode, (event) =>
+      const node = await createShape(element, state.interactionMode, (event) =>
         handleElementPointerDown(event, element.id)
       )
       node.zIndex = 1
       content.addChild(node)
       
+      // 处理选中状态的调整手柄
       // 为选中的单个元素添加调整大小控制柄
       if (
         selected &&
-        state.selectedIds.length === 1 &&
-        state.interactionMode === "select"
+        currentState.selectedIds.length === 1 &&
+        currentState.interactionMode === "select"
       ) {
         // 创建控制柄容器
         const handlesLayer = new Container()
@@ -864,8 +962,8 @@ export const PixiCanvas = () => {
         handlesLayer.position.set(element.x, element.y)
         handlesLayer.angle = element.rotation
         // 根据缩放级别调整控制柄大小
-        const handleSize = Math.max(6, 10 / state.zoom)
-        const edgeThickness = Math.max(16 / state.zoom, handleSize * 1.6)
+        const handleSize = Math.max(6, 10 / currentState.zoom)
+        const edgeThickness = Math.max(16 / currentState.zoom, handleSize * 1.6)
         const activeDirection = resizeRef.current?.direction ?? null
 
         // 绘制调整大小控制柄
@@ -981,7 +1079,7 @@ export const PixiCanvas = () => {
           handle.on("pointerdown", (event) => {
             hovered = true
             updateStyle(true)
-            handleResizeStart(event, element.id, direction)
+            handleResizeStart(event, state.selectedIds, direction)
           })
           handle.on("pointerover", () => {
             hovered = true
@@ -996,13 +1094,270 @@ export const PixiCanvas = () => {
         content.addChild(handlesLayer)
       }
     })
+  }, [handleElementPointerDown, handleResizeStart, state.interactionMode, state.selectedIds])
+
+  const handleSelectionBoxPointerDown = useCallback(
+    (event: FederatedPointerEvent) => {
+      event.stopPropagation()
+      if (stateRef.current.interactionMode !== "select") return
+
+      const { selectedIds, elements } = stateRef.current
+      const content = contentRef.current
+      if (!content) return
+
+      const local = event.getLocalPosition(content)
+      const snapshot: Record<string, CanvasElement> = {}
+      elements.forEach((el) => {
+        if (selectedIds.includes(el.id)) {
+          snapshot[el.id] = cloneElement(el)
+        }
+      })
+
+      dragRef.current = {
+        ids: selectedIds,
+        startPointer: local,
+        snapshot,
+        historySnapshot: cloneElements(elements),
+        moved: false,
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    const content = contentRef.current
+    const app = appRef.current
+    if (!content || !app) return
+
+    // 0. 渲染页面，并且是立即渲染，而不是用户交互触发的
+    renderElements(content, state.elements, state)
+
+    content.removeChildren().forEach((child) => child.destroy({ children: true }))
+    content.sortableChildren = true
+    
+    // 1. 渲染所有元素和单选框
+    state.elements.forEach(async (element) => {
+      const selected = state.selectedIds.includes(element.id)
+      const node = await createShape(element, state.interactionMode, (event) =>
+        handleElementPointerDown(event, element.id)
+      )
+      node.zIndex = 1
+      content.addChild(node)
+
+      if (selected) {
+        const outline = new Graphics()
+        outline.roundRect(0, 0, element.width, element.height, 2)
+        outline.stroke({ width: 1.4, color: SELECTION_COLOR, alpha: 1 })
+        outline.position.set(element.x, element.y)
+        outline.angle = element.rotation
+        outline.zIndex = 2
+        content.addChild(outline)
+      }
+    })
+
+    // 2. 渲染控制点和多选包围盒
+    if (
+      state.interactionMode === "select" &&
+      state.selectedIds.length > 0
+    ) {
+      const selectedElements = state.elements.filter((el) =>
+        state.selectedIds.includes(el.id)
+      )
+      
+      if (selectedElements.length === 0) return
+
+      // 计算包围盒
+      let bounds = { x: 0, y: 0, width: 0, height: 0, rotation: 0 }
+      const isMultiSelection = selectedElements.length > 1
+
+      if (isMultiSelection) {
+        const box = getBoundingBox(selectedElements)
+        if (box) {
+          bounds = { ...box, rotation: 0 }
+        }
+      } else {
+        const el = selectedElements[0]
+        bounds = { x: el.x, y: el.y, width: el.width, height: el.height, rotation: el.rotation }
+      }
+
+      // 绘制多选包围盒
+      if (isMultiSelection) {
+        const box = new Graphics()
+        const dash = 5
+        const gap = 3
+        
+        const drawDashedLine = (x1: number, y1: number, x2: number, y2: number) => {
+           const dx = x2 - x1
+           const dy = y2 - y1
+           const len = Math.sqrt(dx*dx + dy*dy)
+           const count = Math.floor(len / (dash + gap))
+           const dashX = dx / len * dash
+           const dashY = dy / len * dash
+           const gapX = dx / len * gap
+           const gapY = dy / len * gap
+           
+           let cx = x1
+           let cy = y1
+           
+           for (let i = 0; i < count; i++) {
+             box.moveTo(cx, cy)
+             box.lineTo(cx + dashX, cy + dashY)
+             cx += dashX + gapX
+             cy += dashY + gapY
+           }
+           if (Math.sqrt((x2-cx)*(x2-cx) + (y2-cy)*(y2-cy)) > 0) {
+              box.moveTo(cx, cy)
+              box.lineTo(x2, y2)
+           }
+        }
+        
+        drawDashedLine(0, 0, bounds.width, 0)
+        drawDashedLine(bounds.width, 0, bounds.width, bounds.height)
+        drawDashedLine(bounds.width, bounds.height, 0, bounds.height)
+        drawDashedLine(0, bounds.height, 0, 0)
+
+        box.stroke({ width: 2, color: SELECTION_COLOR, alpha: 1 })
+        box.position.set(bounds.x, bounds.y)
+        box.zIndex = 3
+        
+        // Make box interactive for dragging
+        box.eventMode = "static"
+        box.cursor = "move"
+        box.hitArea = new Rectangle(0, 0, bounds.width, bounds.height)
+        box.on("pointerdown", handleSelectionBoxPointerDown)
+
+        content.addChild(box)
+      }
+
+      // 绘制控制点
+      if (!dragRef.current?.moved) {
+      const handlesLayer = new Container()
+      handlesLayer.sortableChildren = true
+      handlesLayer.zIndex = 10
+      handlesLayer.position.set(bounds.x, bounds.y)
+      handlesLayer.angle = bounds.rotation
+
+      const handleSize = Math.max(6, 10 / state.zoom)
+      const edgeThickness = Math.max(16 / state.zoom, handleSize * 1.6)
+      const activeDirection = resizeRef.current?.direction ?? null
+
+      // 确定显示的控制点方向
+      const directions = isMultiSelection
+        ? (["nw", "ne", "sw", "se"] as ResizeDirection[])
+        : RESIZE_DIRECTIONS
+
+      const drawHandle = (
+        target: Graphics,
+        direction: ResizeDirection,
+        opts: { hovered: boolean; active: boolean }
+      ) => {
+        const { hovered, active } = opts
+        const isHighlighted = hovered || active
+        const fill = isHighlighted ? HANDLE_ACTIVE_COLOR : 0xffffff
+        const stroke = isHighlighted ? HANDLE_ACTIVE_COLOR : SELECTION_COLOR
+        target.clear()
+        
+        // 只有单选且非角点时才绘制长条形，多选只绘制方形点
+        if (!isMultiSelection && (direction === "n" || direction === "s")) {
+          target.roundRect(-handleSize, -handleSize / 2, handleSize * 2, handleSize, 4)
+        } else if (!isMultiSelection && (direction === "e" || direction === "w")) {
+          target.roundRect(-handleSize / 2, -handleSize, handleSize, handleSize * 2, 4)
+        } else {
+          target.roundRect(-handleSize / 2, -handleSize / 2, handleSize, handleSize, 4)
+        }
+        
+        target.fill({ color: fill })
+        target.stroke({ width: active ? 1.6 : 1, color: stroke })
+      }
+
+      directions.forEach((direction) => {
+        const handle = new Graphics()
+        handle.eventMode = "static"
+        handle.cursor = RESIZE_CURSORS[direction]
+        handle.zIndex = 2
+        let hovered = false
+        const isActive = activeDirection === direction
+        
+        const updateStyle = (forcedActive?: boolean) =>
+          drawHandle(handle, direction, {
+            hovered,
+            active: forcedActive ?? isActive,
+          })
+        
+        updateStyle()
+        
+        const pos = getHandlePosition(direction, bounds.width, bounds.height)
+        handle.position.set(pos.x, pos.y)
+        handle.visible = !activeDirection || isActive
+
+        // HitArea 逻辑
+        if (isMultiSelection) {
+             handle.hitArea = new Rectangle(
+                -edgeThickness / 2,
+                -edgeThickness / 2,
+                edgeThickness,
+                edgeThickness
+              )
+        } else {
+             switch (direction) {
+                case "n":
+                case "s":
+                  handle.hitArea = new Rectangle(
+                    -bounds.width / 2,
+                    -edgeThickness,
+                    bounds.width,
+                    edgeThickness * 2
+                  )
+                  break
+                case "e":
+                case "w":
+                  handle.hitArea = new Rectangle(
+                    -edgeThickness,
+                    -bounds.height / 2,
+                    edgeThickness * 2,
+                    bounds.height
+                  )
+                  break
+                default:
+                  handle.hitArea = new Rectangle(
+                    -edgeThickness / 2,
+                    -edgeThickness / 2,
+                    edgeThickness,
+                    edgeThickness
+                  )
+                  break
+             }
+        }
+
+        handle.on("pointerdown", (event) => {
+          hovered = true
+          updateStyle(true)
+          handleResizeStart(event, state.selectedIds, direction)
+        })
+        handle.on("pointerover", () => {
+          hovered = true
+          if (!isActive) updateStyle()
+        })
+        handle.on("pointerout", () => {
+          hovered = false
+          if (!isActive) updateStyle()
+        })
+        handlesLayer.addChild(handle)
+      })
+      content.addChild(handlesLayer)
+      }
+    }
   }, [
+    state,
     state.elements,
     state.selectedIds,
     state.interactionMode,
     state.zoom,
     handleElementPointerDown,
     handleResizeStart,
+    handleSelectionBoxPointerDown,
+    renderElements,
+    renderPage,
   ])
 
   // 更新画布内容的位置和缩放

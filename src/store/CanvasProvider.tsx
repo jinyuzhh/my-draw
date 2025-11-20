@@ -6,6 +6,7 @@ import {
   useCallback,
   useRef,
   useEffect,
+  useState,
 } from "react"
 import type { ReactNode } from "react"
 import type { Application } from "pixi.js"
@@ -90,20 +91,27 @@ const baseState: CanvasState = {
 const getInitialState = (): CanvasState => {
   const fallback = deepCopy(baseState)
   if (typeof window === "undefined") return fallback
+
   try {
     const stored = window.localStorage.getItem(STORAGE_KEY)
     if (!stored) return fallback
+
     const parsed = JSON.parse(stored)
+
+    // 状态恢复
     return {
       ...fallback,
       elements: Array.isArray(parsed?.elements) ? parsed.elements : [],
+      selectedIds: Array.isArray(parsed?.selectedIds) ? parsed.selectedIds : [],
       pan:
         parsed?.pan && typeof parsed.pan.x === "number" && typeof parsed.pan.y === "number"
           ? parsed.pan
           : fallback.pan,
       zoom: typeof parsed?.zoom === "number" ? parsed.zoom : fallback.zoom,
+      interactionMode: parsed?.interactionMode || fallback.interactionMode,
     }
-  } catch {
+  } catch (error) {
+    console.error("Failed to load canvas state from local storage", error)
     return fallback
   }
 }
@@ -256,6 +264,7 @@ export const CanvasProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(canvasReducer, undefined, getInitialState)
   // 存储 PixiJS 应用实例的引用
   const appRef = useRef<Application | null>(null)
+  const [isInitialized] = useState(true)
 
   // 使用 useRef 作为内部剪贴板，存储复制的元素
   const clipboardRef = useRef<CanvasElement[]>([])
@@ -727,16 +736,20 @@ export const CanvasProvider = ({ children }: { children: ReactNode }) => {
    */
   useEffect(() => {
     // 检查是否在浏览器环境中运行
-    if (typeof window === "undefined") return
+    if (typeof window === "undefined" || !isInitialized) return
+
     // 将关键状态序列化为JSON字符串
     const payload = JSON.stringify({
       elements: state.elements,
+      selectedIds: state.selectedIds,
       pan: state.pan,
       zoom: state.zoom,
+      interactionMode: state.interactionMode,
+      // 不保存 history 和 redoStack，避免数据量过大
     })
     // 使用STORAGE_KEY作为键保存到localStorage
     window.localStorage.setItem(STORAGE_KEY, payload)
-  }, [state.elements, state.pan, state.zoom])
+  }, [state.elements, state.selectedIds, state.pan, state.zoom, state.interactionMode, isInitialized])
 
   /**
    * 创建上下文值对象
@@ -751,7 +764,7 @@ export const CanvasProvider = ({ children }: { children: ReactNode }) => {
     () => ({
       // 当前画布状态
       state,
-      // 元素操作方法
+      isInitialized, // 有关初始化状态的标记
       addShape,
       addText,
       addImage,
@@ -778,6 +791,7 @@ export const CanvasProvider = ({ children }: { children: ReactNode }) => {
     }),
     [
       state,
+      isInitialized, // 有关初始化状态的标记
       addShape,
       addText,
       addImage,
