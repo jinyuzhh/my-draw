@@ -397,7 +397,7 @@ export const PixiCanvas = () => {
       })
 
       // 定义滚轮事件处理函数
-      handleGlobalWheel = (event: WheelEvent) => {
+      const handleGlobalWheel = (event: WheelEvent) => {
         // 检查是否按下了ctrl键或meta键（Mac）
         if (event.ctrlKey || event.metaKey) {
           // 无论鼠标是否在画布上，都阻止浏览器默认缩放行为
