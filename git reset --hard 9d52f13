@@ -1,0 +1,10 @@
+[33me5eea49[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Merge remote-tracking branch 'origin/main'
+[33m5c35128[m Merge pull request #4 from IIrrony/feature-cjl
+[33mdb911c8[m[33m ([m[1;31morigin/feature-cjl[m[33m)[m refactor(properties): 使用滑块控件实现边框宽度和圆角设置以及颜色选择器优化
+[33mc5aaa63[m Merge pull request #3 from IIrrony/feature-cjl
+[33m9d52f13[m Merge branch 'main' of https://github.com/IIrrony/my-draw into feature-cjl
+[33m957c391[m refactor(canvas): 实现 Ctrl+滚轮画布缩放功能
+[33m13b0310[m fix(图形)：缩小，边框溢出问题，增加圆形缩放为椭圆
+[33mce4a348[m docs：修改更新readme
+[33mf771166[m feat(canvas): 添加双击文本进入编辑，可以输入/删除文本内容
+[33mfb943c5[m Merge pull request #2 from jinyuzhh/main
