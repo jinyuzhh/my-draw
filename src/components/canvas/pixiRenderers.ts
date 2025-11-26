@@ -320,11 +320,51 @@ export const createResizeHandlesLayer = (
 
 export const createSelectionOutline = (element: CanvasElement) => {
   const outline = new Graphics()
-  outline.roundRect(0, 0, element.width, element.height, 2)
+  // 定义虚线参数
+  const dash = 5 // 实线段长度
+  const gap = 3  // 间隔长度
+
+  // 内部辅助函数：绘制虚线
+  const drawDashedLine = (x1: number, y1: number, x2: number, y2: number) => {
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const len = Math.sqrt(dx * dx + dy * dy)
+    const count = Math.floor(len / (dash + gap))
+    const dashX = (dx / len) * dash
+    const dashY = (dy / len) * dash
+    const gapX = (dx / len) * gap
+    const gapY = (dy / len) * gap
+
+    let cx = x1
+    let cy = y1
+
+    for (let i = 0; i < count; i++) {
+      outline.moveTo(cx, cy)
+      outline.lineTo(cx + dashX, cy + dashY)
+      cx += dashX + gapX
+      cy += dashY + gapY
+    }
+    // 绘制剩余部分，确保线条闭合
+    if (Math.sqrt((x2 - cx) * (x2 - cx) + (y2 - cy) * (y2 - cy)) > 0) {
+      outline.moveTo(cx, cy)
+      outline.lineTo(x2, y2)
+    }
+  }
+
+  // 分别绘制矩形的四条边
+  drawDashedLine(0, 0, element.width, 0) // 上边
+  drawDashedLine(element.width, 0, element.width, element.height) // 右边
+  drawDashedLine(element.width, element.height, 0, element.height) // 下边
+  drawDashedLine(0, element.height, 0, 0) // 左边
+
+  // 应用描边样式
   outline.stroke({ width: 1.4, color: SELECTION_COLOR, alpha: 1 })
+  
+  // 设置位置和旋转
   outline.position.set(element.x, element.y)
   outline.angle = element.rotation
   outline.zIndex = 2
+  
   return outline
 }
 
