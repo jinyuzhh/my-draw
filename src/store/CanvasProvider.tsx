@@ -431,7 +431,7 @@ export const CanvasProvider = ({ children }: { children: ReactNode }) => {
         shape,
         fill: "#f8fafc",
         stroke: "#0f172a",
-        strokeWidth: 2,
+        strokeWidth: 1,
         // 矩形默认圆角为12px，圆形无圆角
         cornerRadius: shape === "rectangle" ? 12 : 0,
       }

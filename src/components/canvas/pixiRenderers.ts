@@ -189,33 +189,25 @@ export const createShape = async (
 
 const drawHandle = (
   target: Graphics,
-  direction: ResizeDirection,
-  opts: { hovered: boolean; active: boolean },
+  _direction: ResizeDirection,
+  _opts: { hovered: boolean; active: boolean },
   handleSize: number,
-  isMultiSelection: boolean
+  _isMultiSelection: boolean
 ) => {
-  const { hovered, active } = opts
-  const isHighlighted = hovered || active
-  const fill = isHighlighted ? HANDLE_ACTIVE_COLOR : 0xffffff
-  const stroke = isHighlighted ? HANDLE_ACTIVE_COLOR : SELECTION_COLOR
   target.clear()
+  
+  // 控制点颜色 #29b6f2 (0x29b6f2)
+  const DOT_COLOR = 0x29b6f2
 
-  if (!isMultiSelection && (direction === "n" || direction === "s")) {
-    target.roundRect(-handleSize, -handleSize / 2, handleSize * 2, handleSize, 4)
-  } else if (!isMultiSelection && (direction === "e" || direction === "w")) {
-    target.roundRect(-handleSize / 2, -handleSize, handleSize, handleSize * 2, 4)
-  } else {
-    target.roundRect(
-      -handleSize / 2,
-      -handleSize / 2,
-      handleSize,
-      handleSize,
-      4
-    )
-  }
-
-  target.fill({ color: fill })
-  target.stroke({ width: active ? 1.6 : 1, color: stroke })
+  // 绘制圆形 (x, y, radius)
+  // 半径 = 直径 / 2
+  target.circle(0, 0, handleSize / 2)
+  
+  // 填充实心蓝
+  target.fill({ color: DOT_COLOR })
+  
+  // 添加 1px 白色描边，防止在深色背景或同色物体上看不清
+  target.stroke({ width: 1, color: 0xffffff })
 }
 
 export const createResizeHandlesLayer = (
@@ -235,8 +227,9 @@ export const createResizeHandlesLayer = (
   handlesLayer.position.set(element.x, element.y)
   handlesLayer.angle = element.rotation
 
-  const handleSize = Math.max(6, 10 / zoom)
-  const edgeThickness = Math.max(16 / zoom, handleSize * 1.6)
+  const handleSize = 7 / zoom 
+  // 增加点击区域的大小（edgeThickness），让小圆点更容易被点中
+  const edgeThickness = Math.max(20 / zoom, handleSize * 2)
 
   RESIZE_DIRECTIONS.forEach((direction) => {
     const handle = new Graphics()
@@ -245,6 +238,7 @@ export const createResizeHandlesLayer = (
     handle.zIndex = 2
     let hovered = false
     const isActive = activeDirection === direction
+
     const updateStyle = (forcedActive?: boolean) =>
       drawHandle(handle, direction, {
         hovered,
@@ -443,7 +437,7 @@ export const createBoundsHandlesLayer = ({
   handlesLayer.position.set(bounds.x, bounds.y)
   handlesLayer.angle = bounds.rotation
 
-  const handleSize = Math.max(6, 10 / zoom)
+  const handleSize = 7 / zoom
   const edgeThickness = Math.max(16 / zoom, handleSize * 1.6)
 
   const directions = isMultiSelection
